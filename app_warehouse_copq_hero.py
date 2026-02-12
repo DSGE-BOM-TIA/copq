@@ -2,6 +2,7 @@
 # Deploy with requirements.txt and hero_infographic.png
 
 import streamlit as st
+st.write("RUNNING BUILD:V4-VERIFY-2026-02-12")
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
