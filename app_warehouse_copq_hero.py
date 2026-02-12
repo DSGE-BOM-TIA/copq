@@ -1,5 +1,5 @@
 # Open in Notepad++ (UTF-8). Save As: app_warehouse_copq_hero.py
-# Run: python -m streamlit run app_warehouse_copq_hero.py
+# Run (Windows): py -m streamlit run app_warehouse_copq_hero.py
 
 
 from __future__ import annotations
@@ -77,12 +77,12 @@ st.markdown(f"""
 # =========================
 @dataclass
 class Tri:
-    low: float
-    mode: float
-    high: float
+    best: float
+    likely: float
+    worst: float
 
 def tri_vals(tri: Tri) -> Tuple[float, float, float]:
-    return tri.low, tri.mode, tri.high
+    return tri.best, tri.likely, tri.worst
 
 @dataclass
 class DefectCost:
@@ -91,11 +91,6 @@ class DefectCost:
     cost: Tri
 
 def compute_copq(orders: float, opps_per_order: float, defects: Dict[str, DefectCost]) -> pd.DataFrame:
-    """
-    Scenario table for BEST / LIKELY / WORST.
-    Defect count = orders * opportunities/order * (PPM / 1,000,000)
-    COPQ = defects * cost_per_defect
-    """
     rows = []
     for scenario, pick in [("BEST", 0), ("LIKELY", 1), ("WORST", 2)]:
         total = 0.0
@@ -124,7 +119,6 @@ def compute_copq(orders: float, opps_per_order: float, defects: Dict[str, Defect
     return pd.DataFrame(rows)
 
 def kpi_rates(defects: Dict[str, DefectCost]) -> Dict[str, float]:
-    """Converts LIKELY PPM into accuracy-like KPIs + perfect order proxy."""
     mispick_ppm = tri_vals(defects["mispick"].ppm)[1]
     damage_ppm = tri_vals(defects["damage"].ppm)[1]
     late_ppm = tri_vals(defects["late"].ppm)[1]
@@ -134,8 +128,8 @@ def kpi_rates(defects: Dict[str, DefectCost]) -> Dict[str, float]:
     damage_free = 1.0 - ppm_to_rate(damage_ppm)
     on_time = 1.0 - ppm_to_rate(late_ppm)
     label_accuracy = 1.0 - ppm_to_rate(label_ppm)
-
     perfect_order = pick_accuracy * damage_free * on_time * label_accuracy
+
     return {
         "Pick Accuracy": pick_accuracy,
         "Damage-Free Rate": damage_free,
@@ -145,53 +139,60 @@ def kpi_rates(defects: Dict[str, DefectCost]) -> Dict[str, float]:
     }
 
 # =========================
-# Sidebar: Deterministic inputs
+# Sidebar Inputs (Deterministic + Best/Likely/Worst)
 # =========================
 st.sidebar.markdown("### 📦 Fulfillment Inputs (Deterministic)")
 orders = st.sidebar.number_input("Orders shipped per month", min_value=0.0, value=250000.0, step=1000.0)
 opps = st.sidebar.number_input("Opportunities per order", min_value=1.0, value=4.0, step=1.0,
-                              help="Example: pick, pack, label, load = 4 opportunities per order.")
+                               help="Example: pick, pack, label, load = 4 opportunities per order.")
 
-st.sidebar.markdown("### 🧩 Defect Rates (PPM) — Best / Likely / Worst")
-st.sidebar.caption("PPM = defects per million opportunities. If you only know %, use: PPM = % × 10,000")
+st.sidebar.markdown("### 🧩 Defects (PPM) and Cost per Defect ($)")
+st.sidebar.caption("Enter Best / Likely / Worst for each defect type. PPM = defects per million opportunities.")
 
-def ppm_slider(name, default):
-    return st.sidebar.slider(f"{name} PPM (best, likely, worst)", 0.0, 20000.0, default)
+def tri_input_block(title: str, ppm_default: Tuple[float,float,float], cost_default: Tuple[float,float,float],
+                    ppm_max: float = 20000.0, cost_max: float = 5000.0) -> Tuple[Tri, Tri]:
+    st.sidebar.markdown(f"**{title}**")
+    c1, c2, c3 = st.sidebar.columns(3)
+    with c1:
+        ppm_best = st.number_input(f"{title} PPM (Best)", 0.0, ppm_max, float(ppm_default[0]), 10.0, key=f"{title}_ppm_b")
+        cost_best = st.number_input(f"{title} $/def (Best)", 0.0, cost_max, float(cost_default[0]), 1.0, key=f"{title}_c_b")
+    with c2:
+        ppm_likely = st.number_input(f"{title} PPM (Likely)", 0.0, ppm_max, float(ppm_default[1]), 10.0, key=f"{title}_ppm_l")
+        cost_likely = st.number_input(f"{title} $/def (Likely)", 0.0, cost_max, float(cost_default[1]), 1.0, key=f"{title}_c_l")
+    with c3:
+        ppm_worst = st.number_input(f"{title} PPM (Worst)", 0.0, ppm_max, float(ppm_default[2]), 10.0, key=f"{title}_ppm_w")
+        cost_worst = st.number_input(f"{title} $/def (Worst)", 0.0, cost_max, float(cost_default[2]), 1.0, key=f"{title}_c_w")
 
-def cost_slider(name, default):
-    return st.sidebar.slider(f"{name} cost/defect $ (best, likely, worst)", 0.0, 5000.0, default)
+    # Ensure monotonic defaults (best <= likely <= worst) even if user enters out of order
+    ppm_best2, ppm_likely2, ppm_worst2 = sorted([ppm_best, ppm_likely, ppm_worst])
+    cost_best2, cost_likely2, cost_worst2 = sorted([cost_best, cost_likely, cost_worst])
 
-damage_ppm = ppm_slider("Damage", (300.0, 900.0, 2500.0))
-damage_cost = cost_slider("Damage", (20.0, 80.0, 250.0))
+    return Tri(ppm_best2, ppm_likely2, ppm_worst2), Tri(cost_best2, cost_likely2, cost_worst2)
 
-mispick_ppm = ppm_slider("Mispick / Wrong item", (200.0, 1200.0, 4000.0))
-mispick_cost = cost_slider("Mispick / Wrong item", (25.0, 120.0, 400.0))
+damage_ppm, damage_cost = tri_input_block("Damage", (300, 900, 2500), (20, 80, 250))
+mispick_ppm, mispick_cost = tri_input_block("Mispick", (200, 1200, 4000), (25, 120, 400))
+late_ppm, late_cost = tri_input_block("Late/SLA", (80, 400, 1200), (10, 60, 200))
+label_ppm, label_cost = tri_input_block("Label Error", (50, 250, 900), (8, 45, 150))
 
-late_ppm = ppm_slider("Late / SLA miss", (80.0, 400.0, 1200.0))
-late_cost = cost_slider("Late / SLA miss", (10.0, 60.0, 200.0))
-
-label_ppm = ppm_slider("Label / carton ID error", (50.0, 250.0, 900.0))
-label_cost = cost_slider("Label / carton ID error", (8.0, 45.0, 150.0))
-
-st.sidebar.markdown("### ⚖️ Optional scope")
-include_customer_churn = st.sidebar.checkbox("Include customer churn proxy", value=False)
-if include_customer_churn:
-    churn_ppm = ppm_slider("Customer loss event (proxy)", (1.0, 5.0, 20.0))
-    churn_cost = cost_slider("Customer loss $ impact (proxy)", (200.0, 900.0, 3000.0))
+include_churn = st.sidebar.checkbox("Include customer churn proxy", value=False)
+if include_churn:
+    churn_ppm, churn_cost = tri_input_block("Churn Proxy", (1, 5, 20), (200, 900, 3000), ppm_max=2000.0, cost_max=20000.0)
 else:
-    churn_ppm = (0.0, 0.0, 0.0)
-    churn_cost = (0.0, 0.0, 0.0)
+    churn_ppm, churn_cost = Tri(0,0,0), Tri(0,0,0)
+
+st.sidebar.markdown("### 🔁 Conversion reminder")
+st.sidebar.write("If you only know %, use: **PPM = % × 10,000** (0.12% → 1,200 PPM)")
 
 defects = {
-    "damage": DefectCost("Damage", Tri(*map(float, damage_ppm)), Tri(*map(float, damage_cost))),
-    "mispick": DefectCost("Mispick / Wrong item", Tri(*map(float, mispick_ppm)), Tri(*map(float, mispick_cost))),
-    "late": DefectCost("Late / SLA miss", Tri(*map(float, late_ppm)), Tri(*map(float, late_cost))),
-    "label": DefectCost("Label / carton ID error", Tri(*map(float, label_ppm)), Tri(*map(float, label_cost))),
-    "churn": DefectCost("Customer loss (proxy)", Tri(*map(float, churn_ppm)), Tri(*map(float, churn_cost))),
+    "damage": DefectCost("Damage", damage_ppm, damage_cost),
+    "mispick": DefectCost("Mispick / Wrong item", mispick_ppm, mispick_cost),
+    "late": DefectCost("Late / SLA miss", late_ppm, late_cost),
+    "label": DefectCost("Label / carton ID error", label_ppm, label_cost),
+    "churn": DefectCost("Customer loss (proxy)", churn_ppm, churn_cost),
 }
 
 # =========================
-# Hero header (dynamic)
+# Hero Header
 # =========================
 left, right = st.columns([1.55, 1])
 with left:
@@ -199,15 +200,15 @@ with left:
     <div class="hero-card">
       <div class="pill">Dynamic COPQ Calculator • Shipping/Fulfillment • Best ↔ Worst</div>
       <h1 style="margin:10px 0 6px 0;">Fulfillment COPQ Hero</h1>
-      <div class="muted">Input volume + PPM defect rates + handling costs. Get best/likely/worst COPQ, plus KPIs for management, CFO, process engineering, and customers.</div>
-      <div class="tiny" style="margin-top:10px;">Conversion reminder: <b>PPM = % × 10,000</b> (example: 0.12% = 1,200 PPM)</div>
+      <div class="muted">Deterministic volume + defect PPM + handling cost → best/likely/worst COPQ and executive KPIs.</div>
+      <div class="tiny" style="margin-top:10px;">Use the Compare tab to overlay your actual monthly COPQ against the best↔worst band.</div>
     </div>
     """, unsafe_allow_html=True)
 with right:
     if hero_b64:
-        st.image("hero_infographic.png", caption="Hero theme", use_container_width=True)
+        st.image("hero_infographic.png", use_container_width=True)
     else:
-        st.info("Place hero_infographic.png in the same folder as this app to show the hero image.")
+        st.info("Add hero_infographic.png to your repo (same folder as the app) to show the hero background.")
 
 st.divider()
 
@@ -240,7 +241,7 @@ st.divider()
 # =========================
 # Tabs
 # =========================
-tab1, tab2, tab3, tab4 = st.tabs(["1) COPQ Breakdown", "2) Best↔Worst Visual", "3) Compare to Actuals", "4) Industry Targets (Reference)"])
+tab1, tab2, tab3 = st.tabs(["1) COPQ Breakdown", "2) Best↔Worst Visual", "3) Compare to Actuals"])
 
 with tab1:
     st.subheader("COPQ Breakdown (Best / Likely / Worst)")
@@ -249,12 +250,12 @@ with tab1:
     st.markdown("### Executive summary (Likely)")
     likely_rows = df[(df["Scenario"] == "LIKELY") & (df["Defect Type"] != "TOTAL")].copy()
     likely_rows = likely_rows.sort_values("COPQ Cost", ascending=False)
-    st.dataframe(likely_rows[["Defect Type","PPM","Defects (count)","Cost/Defect","COPQ Cost"]], use_container_width=True)
+    st.dataframe(likely_rows[["Defect Type", "PPM", "Defects (count)", "Cost/Defect", "COPQ Cost"]], use_container_width=True)
 
 with tab2:
     st.subheader("Scenario visual (monthly COPQ)")
     fig = plt.figure()
-    plt.bar(["Best","Likely","Worst"], [best, likely, worst])
+    plt.bar(["Best", "Likely", "Worst"], [best, likely, worst])
     plt.ylabel("COPQ $ / month")
     plt.title("Best vs Likely vs Worst COPQ")
     st.pyplot(fig)
@@ -272,10 +273,10 @@ with tab2:
 
 with tab3:
     st.subheader("Compare to Actuals")
-    st.caption("Upload CSV columns: month,copq_actual. Optional: pick_accuracy,on_time,damage_free,label_accuracy")
+    st.caption("Upload CSV columns: month,copq_actual (monthly).")
     up = st.file_uploader("Upload actuals CSV", type=["csv"])
     if up is None:
-        st.info("Upload actual monthly COPQ to compare to best/likely/worst bands.")
+        st.info("Upload actual monthly COPQ to compare to the modeled best/likely/worst band.")
     else:
         act = pd.read_csv(up)
         if "copq_actual" not in act.columns:
@@ -301,19 +302,5 @@ with tab3:
             plt.legend()
             st.pyplot(fig)
 
-with tab4:
-    st.subheader("Industry targets (reference)")
-    st.markdown("""
-Use these as **conversation anchors** (targets vary by operation, SKU mix, and customer requirements):
-
-- **Order picking accuracy**: best-in-class often cited around **≥99.9%**; typical ranges are lower.
-- **Best-in-class DC picking accuracy** is also cited around **≥99.68%** in some benchmarking materials.
-- **Warehouse order accuracy targets** are often referenced around **99.5%–99.9%** as “best-in-class” targets.
-
-Tip: convert your PPM inputs into an accuracy proxy:
-- **Accuracy ≈ 1 − (PPM/1,000,000)** (for that defect type)
-""")
-
-# Quick export
 st.divider()
 st.download_button("Download COPQ breakdown (CSV)", data=df.to_csv(index=False), file_name="copq_breakdown_best_likely_worst.csv", mime="text/csv")
